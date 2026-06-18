@@ -190,6 +190,22 @@ function priorityScore(podSpec, node) {
   }
   scores.push({ name: '节点亲和性', score: affinityScore, weight: 3, description: affinityDesc });
 
+  let antiAffinityScore = 100;
+  let antiAffinityDesc = '反亲和性未启用';
+  if (podSpec.antiAffinityEnabled && podSpec.labels && podSpec.labels.app) {
+    const sameAppPods = node.pods.filter(p =>
+      p.labels && p.labels.app === podSpec.labels.app
+    );
+    const samePodCount = sameAppPods.length;
+    if (samePodCount > 0) {
+      antiAffinityScore = Math.max(0, 100 - samePodCount * 35);
+      antiAffinityDesc = `检测到 ${samePodCount} 个同 app (${podSpec.labels.app}) Pod，扣 ${samePodCount * 35} 分`;
+    } else {
+      antiAffinityDesc = `无同 app (${podSpec.labels.app}) Pod，满分`;
+    }
+  }
+  scores.push({ name: 'Pod 反亲和性', score: antiAffinityScore, weight: 4, description: antiAffinityDesc });
+
   const podCount = node.pods.length;
   const podDensityScore = Math.max(0, 100 - podCount * 10);
   scores.push({ name: 'Pod 密度均衡', score: podDensityScore, weight: 1, description: `当前运行 ${podCount} 个 Pod` });

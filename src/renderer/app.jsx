@@ -9,7 +9,9 @@ function App() {
     memory: 1,
     nodeSelector: {},
     tolerations: [],
-    affinity: {}
+    affinity: {},
+    labels: { app: 'my-app' },
+    antiAffinityEnabled: true
   });
   const [scheduling, setScheduling] = useState(false);
   const [resetting, setResetting] = useState(false);
@@ -211,6 +213,38 @@ function App() {
                     value={podSpec.name}
                     onChange={(e) => setPodSpec({ ...podSpec, name: e.target.value })}
                   />
+                </div>
+
+                <div className="form-group">
+                  <label>App 标签 (用于反亲和性识别同类 Pod)</label>
+                  <input
+                    type="text"
+                    value={podSpec.labels.app || ''}
+                    onChange={(e) => setPodSpec({
+                      ...podSpec,
+                      labels: { ...podSpec.labels, app: e.target.value }
+                    })}
+                    placeholder="如: my-app"
+                  />
+                </div>
+
+                <div className="form-group">
+                  <label className="checkbox-label">
+                    <input
+                      type="checkbox"
+                      checked={podSpec.antiAffinityEnabled}
+                      onChange={(e) => setPodSpec({
+                        ...podSpec,
+                        antiAffinityEnabled: e.target.checked
+                      })}
+                    />
+                    <span>
+                      🚫 启用 Pod 反亲和性
+                      <span className="hint-text">
+                        （尽量不要和带有相同 app 标签的 Pod 调度到同一节点）
+                      </span>
+                    </span>
+                  </label>
                 </div>
 
                 <div className="form-group">
@@ -660,6 +694,11 @@ function PodBlock({ pod }) {
         />
         <span className="pod-name">{pod.name}</span>
       </div>
+      {pod.labels && pod.labels.app && (
+        <div className="pod-app-label" style={{ backgroundColor: `${podColor}30` }}>
+          🏷️ app: {pod.labels.app}
+        </div>
+      )}
       <div className="pod-resources">
         <span>💻 {pod.cpu} 核</span>
         <span>🧠 {pod.memory} Gi</span>
