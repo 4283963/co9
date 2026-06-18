@@ -1,0 +1,15 @@
+{
+  "name": "k8s-scheduler-sandbox",
+  "version": "1.0.0",
+  "description": "Kubernetes 调度器模拟沙盒 - 学习 Pod 调度原理",
+  "main": "src/main/main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev"
+  },
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^28.0.0"
+  }
+}
