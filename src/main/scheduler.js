@@ -45,13 +45,32 @@ const initialNodes = [
 
 let nodes = JSON.parse(JSON.stringify(initialNodes));
 
+let scheduleQueue = Promise.resolve();
+let podCounter = 0;
+let resetting = false;
+
+function generatePodId() {
+  podCounter += 1;
+  return `pod-${Date.now()}-${podCounter.toString().padStart(6, '0')}`;
+}
+
+function withLock(fn) {
+  const currentQueue = scheduleQueue;
+  const resultPromise = currentQueue.then(() => fn());
+  scheduleQueue = resultPromise.catch(() => {});
+  return resultPromise;
+}
+
 function getInitialNodes() {
   return JSON.parse(JSON.stringify(nodes));
 }
 
 function resetSimulation() {
-  nodes = JSON.parse(JSON.stringify(initialNodes));
-  return getInitialNodes();
+  return withLock(() => {
+    nodes = JSON.parse(JSON.stringify(initialNodes));
+    podCounter = 0;
+    return getInitialNodes();
+  });
 }
 
 function predicateCheck(podSpec, node) {
@@ -239,10 +258,14 @@ function checkNodeSelectorTerms(terms, labels) {
   return terms.some(term => checkMatchExpressions(term.matchExpressions, labels));
 }
 
-function schedulePod(podSpec) {
+async function schedulePod(podSpec) {
+  return withLock(() => runSchedulingLogic(podSpec));
+}
+
+function runSchedulingLogic(podSpec) {
   const result = {
     success: false,
-    podId: `pod-${Date.now()}`,
+    podId: generatePodId(),
     selectedNode: null,
     evaluationLog: [],
     nodes: []
@@ -259,7 +282,7 @@ function schedulePod(podSpec) {
 
   result.evaluationLog.push({
     phase: '调度开始',
-    message: `开始调度 Pod: ${pod.name}`,
+    message: `开始调度 Pod: ${pod.name} (请求 ${podSpec.cpu} 核 / ${podSpec.memory} Gi)`,
     timestamp: new Date().toISOString()
   });
 
@@ -287,7 +310,7 @@ function schedulePod(podSpec) {
   if (filteredNodes.length === 0) {
     result.evaluationLog.push({
       phase: '调度失败',
-      message: '没有节点通过预选阶段，Pod 无法调度'
+      message: '没有节点通过预选阶段，Pod 无法调度 (Pending: Unschedulable)'
     });
     result.nodes = getInitialNodes();
     return result;
@@ -321,25 +344,65 @@ function schedulePod(podSpec) {
 
   result.evaluationLog.push({
     phase: '优选完成',
-    message: `节点 ${selected.nodeName} 得分最高 (${selected.finalScore} 分)，被选中`,
+    message: `节点 ${selected.nodeName} 得分最高 (${selected.finalScore} 分)，候选绑定`,
     ranking: priorityResults.map((p, i) => `${i + 1}. ${p.nodeName}: ${p.finalScore} 分`)
   });
 
   const targetNode = nodes.find(n => n.id === selected.nodeId);
+
+  result.evaluationLog.push({
+    phase: '绑定校验',
+    message: `对 ${targetNode.name} 执行绑定前最终资源校验 (double-check)`,
+    checkBeforeBind: {
+      node: targetNode.name,
+      cpuAvailable: targetNode.totalCPU - targetNode.usedCPU,
+      memoryAvailable: targetNode.totalMemory - targetNode.usedMemory,
+      cpuRequested: podSpec.cpu,
+      memoryRequested: podSpec.memory
+    }
+  });
+
+  const finalCPUOk = targetNode.usedCPU + podSpec.cpu <= targetNode.totalCPU;
+  const finalMemoryOk = targetNode.usedMemory + podSpec.memory <= targetNode.totalMemory;
+
+  if (!finalCPUOk || !finalMemoryOk) {
+    const failReasons = [];
+    if (!finalCPUOk) failReasons.push(`CPU 不足 (需要 ${podSpec.cpu}核，仅剩 ${targetNode.totalCPU - targetNode.usedCPU}核)`);
+    if (!finalMemoryOk) failReasons.push(`内存不足 (需要 ${podSpec.memory}Gi，仅剩 ${targetNode.totalMemory - targetNode.usedMemory}Gi)`);
+    result.evaluationLog.push({
+      phase: '调度失败',
+      message: `绑定前最终校验失败: ${failReasons.join('，')}，Pod 无法调度`,
+      failureReason: failReasons
+    });
+    result.nodes = getInitialNodes();
+    return result;
+  }
+
+  const cpuBefore = targetNode.usedCPU;
+  const memoryBefore = targetNode.usedMemory;
   targetNode.usedCPU += podSpec.cpu;
   targetNode.usedMemory += podSpec.memory;
   pod.status = 'Running';
   targetNode.pods.push(pod);
 
+  result.evaluationLog.push({
+    phase: '资源扣减',
+    message: `${targetNode.name} 资源已原子扣减`,
+    resourceDelta: {
+      cpu: `${cpuBefore} -> ${targetNode.usedCPU} (+${podSpec.cpu})`,
+      memory: `${memoryBefore} -> ${targetNode.usedMemory} (+${podSpec.memory})`
+    }
+  });
+
   result.success = true;
   result.selectedNode = selected.nodeId;
-  result.pod = pod;
+  result.pod = { ...pod };
   result.nodes = getInitialNodes();
 
   result.evaluationLog.push({
     phase: '绑定完成',
     message: `Pod ${pod.name} 已成功绑定到 ${targetNode.name}`,
-    pod: pod,
+    pod: { ...pod },
     node: targetNode.name
   });
 

@@ -12,6 +12,9 @@ function App() {
     affinity: {}
   });
   const [scheduling, setScheduling] = useState(false);
+  const [resetting, setResetting] = useState(false);
+  const schedulePendingRef = React.useRef(false);
+  const scheduleQueueRef = React.useRef(Promise.resolve());
   const [scheduleResult, setScheduleResult] = useState(null);
   const [activeTab, setActiveTab] = useState('basic');
   const [selectorKey, setSelectorKey] = useState('');
@@ -31,25 +34,48 @@ function App() {
   };
 
   const handleSchedule = async () => {
+    if (schedulePendingRef.current || resetting) return;
+    schedulePendingRef.current = true;
     setScheduling(true);
-    setScheduleResult(null);
-    try {
-      const result = await ipcRenderer.invoke('schedule-pod', podSpec);
-      setScheduleResult(result);
-      setNodes(result.nodes);
-      setShowLog(true);
-    } catch (error) {
-      console.error('调度失败:', error);
-    } finally {
-      setScheduling(false);
-    }
+
+    const queueHead = scheduleQueueRef.current;
+    const thisTask = (async () => {
+      await queueHead;
+      setScheduleResult(null);
+      try {
+        const result = await ipcRenderer.invoke('schedule-pod', podSpec);
+        setScheduleResult(result);
+        setNodes(result.nodes);
+        setShowLog(true);
+        return result;
+      } catch (error) {
+        console.error('调度失败:', error);
+        throw error;
+      } finally {
+        setScheduling(false);
+        schedulePendingRef.current = false;
+      }
+    })();
+    scheduleQueueRef.current = thisTask.catch(() => {});
   };
 
   const handleReset = async () => {
-    const resetNodes = await ipcRenderer.invoke('reset-simulation');
-    setNodes(resetNodes);
-    setScheduleResult(null);
-    setShowLog(false);
+    if (resetting) return;
+    setResetting(true);
+    setScheduling(true);
+
+    try {
+      await scheduleQueueRef.current;
+      const resetNodes = await ipcRenderer.invoke('reset-simulation');
+      setNodes(resetNodes);
+      setScheduleResult(null);
+      setShowLog(false);
+    } catch (error) {
+      console.error('重置失败:', error);
+    } finally {
+      setScheduling(false);
+      setResetting(false);
+    }
   };
 
   const addNodeSelector = () => {
@@ -337,8 +363,12 @@ function App() {
               >
                 {scheduling ? '⏳ 调度中...' : '🚀 执行调度'}
               </button>
-              <button className="reset-btn" onClick={handleReset}>
-                🔄 重置模拟
+              <button
+                className="reset-btn"
+                onClick={handleReset}
+                disabled={scheduling || resetting}
+              >
+                {resetting ? '⏳ 重置中...' : '🔄 重置模拟'}
               </button>
             </div>
           </div>
@@ -388,18 +418,23 @@ function LogEntry({ log }) {
       '预选完成': '#27ae60',
       '优选阶段': '#9b59b6',
       '优选完成': '#27ae60',
-      '绑定完成': '#16a085',
+      '绑定校验': '#e67e22',
+      '资源扣减': '#16a085',
+      '绑定完成': '#1abc9c',
       '调度失败': '#e74c3c'
     };
     return colors[phase] || '#7f8c8d';
   };
+
+  const hasExpandable = log.checks || log.scoreDetails || log.ranking
+    || log.checkBeforeBind || log.resourceDelta || log.candidates;
 
   return (
     <div className="log-entry">
       <div
         className="log-phase"
         style={{ borderColor: getPhaseColor(log.phase) }}
-        onClick={() => log.checks || log.scoreDetails ? setExpanded(!expanded) : null}
+        onClick={() => hasExpandable ? setExpanded(!expanded) : null}
       >
         <span
           className="phase-label"
@@ -410,7 +445,7 @@ function LogEntry({ log }) {
         <span className="log-message">
           {log.message || `${log.node}: ${log.passed ? '通过' : '未通过'}`}
         </span>
-        {(log.checks || log.scoreDetails || log.ranking) && (
+        {hasExpandable && (
           <span className="expand-icon">{expanded ? '▲' : '▼'}</span>
         )}
       </div>
@@ -440,31 +475,76 @@ function LogEntry({ log }) {
         </div>
       )}
 
-      {expanded && log.scoreDetails && (
+      {expanded && log.checkBeforeBind && (
         <div className="log-details">
-          <div className="score-summary">
-            <strong>综合得分: {log.finalScore} 分</strong>
+          <div className="score-summary" style={{ background: 'rgba(230, 126, 34, 0.2)', color: '#e67e22' }}>
+            <strong>🔐 绑定前最终校验 (Double-Check Locking)</strong>
           </div>
           <table className="score-table">
             <thead>
               <tr>
-                <th>评分项</th>
-                <th>得分</th>
-                <th>权重</th>
-                <th>说明</th>
+                <th>资源</th>
+                <th>节点可用</th>
+                <th>Pod 请求</th>
+                <th>校验结果</th>
               </tr>
             </thead>
             <tbody>
-              {log.scoreDetails.map((detail, i) => (
-                <tr key={i}>
-                  <td>{detail.name}</td>
-                  <td>{detail.score}</td>
-                  <td>×{detail.weight}</td>
-                  <td>{detail.description}</td>
-                </tr>
-              ))}
+              <tr>
+                <td>💻 CPU</td>
+                <td>{log.checkBeforeBind.cpuAvailable} 核</td>
+                <td>{log.checkBeforeBind.cpuRequested} 核</td>
+                <td style={{ color: log.checkBeforeBind.cpuAvailable >= log.checkBeforeBind.cpuRequested ? '#2ecc71' : '#e74c3c' }}>
+                  {log.checkBeforeBind.cpuAvailable >= log.checkBeforeBind.cpuRequested ? '✓ 通过' : '✗ 不足'}
+                </td>
+              </tr>
+              <tr>
+                <td>🧠 内存</td>
+                <td>{log.checkBeforeBind.memoryAvailable} Gi</td>
+                <td>{log.checkBeforeBind.memoryRequested} Gi</td>
+                <td style={{ color: log.checkBeforeBind.memoryAvailable >= log.checkBeforeBind.memoryRequested ? '#2ecc71' : '#e74c3c' }}>
+                  {log.checkBeforeBind.memoryAvailable >= log.checkBeforeBind.memoryRequested ? '✓ 通过' : '✗ 不足'}
+                </td>
+              </tr>
             </tbody>
           </table>
+        </div>
+      )}
+
+      {expanded && log.resourceDelta && (
+        <div className="log-details">
+          <div className="score-summary" style={{ background: 'rgba(22, 160, 133, 0.2)', color: '#16a085' }}>
+            <strong>⚡ 资源原子扣减成功</strong>
+          </div>
+          <table className="score-table">
+            <thead>
+              <tr><th>资源</th><th>扣减前</th><th></th><th>扣减后</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>💻 CPU</td>
+                <td colSpan="3" style={{ fontFamily: 'Monaco, Menlo, monospace', color: '#64c8ff' }}>
+                  {log.resourceDelta.cpu}
+                </td>
+              </tr>
+              <tr>
+                <td>🧠 内存</td>
+                <td colSpan="3" style={{ fontFamily: 'Monaco, Menlo, monospace', color: '#98fb98' }}>
+                  {log.resourceDelta.memory}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {expanded && log.candidates && (
+        <div className="log-details">
+          <div className="ranking">
+            <div className="rank-item" style={{ background: 'rgba(52, 152, 219, 0.2)', color: '#3498db' }}>
+              通过预选的节点：{log.candidates.join('、')}
+            </div>
+          </div>
         </div>
       )}
 
